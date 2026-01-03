@@ -1,7 +1,15 @@
 import math
 from scipy.stats import norm
+
 #core math logic program
 #foundation of project
+
+
+# theta(time decay)
+# vega (volatility sensitivity)
+# delta (price sensitivity)
+# gamma (delta's sensitivity)
+# rho (sensitivity of option price to interest rate) small bc intererest rate moves slow
 
 class BlackScholes:
     def __init__(
@@ -12,53 +20,78 @@ class BlackScholes:
             volatility: float,
             interest_rate: float,
     ):
-        self.time_to_maturity = time_to_maturity
-        self.strike = strike
-        self.current_price = current_price
-        self.volatility = volatility
-        self.interest_rate = interest_rate
+        if time_to_maturity <= 0:
+            raise ValueError("Time to maturity must be positive")
+        self.T = time_to_maturity
+        self.K = strike
+        self.S = current_price
+        self.sigma = volatility
+        self.r = interest_rate
+    
+    def d1(self): #expected benefit of receiving the stock. Indicates how much option price changes for $1 change in stock price
+        return (
+            math.log(self.S/self.K) +
+            (self.r + 0.5 * self.sigma ** 2) * self.T
+            ) / (self.sigma * math.sqrt(self.T))
+    
+    def d2(self): #probaility of exercising the option. Risk-neutral prob that the option will expire in-the-money
+        return self.d1() - self.sigma * math.sqrt(self.T)
+    
+    def price(self):
+        d1 = self.d1()
+        d2 = self.d2()
 
-#cummulative distrubition funct for variable. Black-Scholes depends on probabilities
-
-    def run(
-        self,
-    ):
-        time_to_maturity = self.time_to_maturity
-        strike = self.strike
-        current_price = self.current_price
-        volatility = self.volatility
-        interest_rate = self.interest_rate
-
-        d1 = (
-            math.log(current_price/strike) +
-            (interest_rate + 0.5 * volatility ** 2) * time_to_maturity
-            )/(
-                volatility * math.sqrt(time_to_maturity)
-
-            )
-        d2 = d1 - volatility * math.sqrt(time_to_maturity)
-
-        call_price = current_price * norm.cdf(d1) - (
-            strike * math.exp(-(interest_rate * time_to_maturity)) * norm.cdf(d2)
+        call = self.S * norm.cdf(d1) - (
+            self.K * math.exp(-(self.r * self.T)) * norm.cdf(d2)
         )
 
-        put_price = (
-            strike * math.exp(-(interest_rate * time_to_maturity)) * norm.cdf(-d2)
-        ) - current_price *norm.cdf(-d1)
-        
-        self.call_price = call_price
-        self.put_price = put_price
+        put = (
+            self.K * math.exp(-(self.r * self.T)) * norm.cdf(-d2)
+        ) - self.S * norm.cdf(-d1)
 
-        self.call_delta = norm.cdf(d1)
-        self.put_delta = 1 - norm.cdf(d1)
+        return call, put
 
-        self.call_gamma = norm.pdf(d1) / (
-            current_price * volatility * math.sqrt(time_to_maturity)
+    def greeks(self):
+        d1 = self.d1()
+        d2 = self.d2()
+
+        pdf_d1 = norm.pdf(d1)
+
+        call_delta = norm.cdf(d1)
+        put_delta = norm.cdf(d1) - 1
+
+
+        gamma = pdf_d1 / (
+            self.S * self.sigma * math.sqrt(self.T)
         )
 
-        self.put_gamma = self.call_gamma
+        vega = self.S * pdf_d1 * math.sqrt(self.T)
+        vega /= 100 #to report 1% in change in volatility
 
-        return call_price, put_price
+        call_theta = (
+            -(self.S * pdf_d1 * self.sigma) / (2 * math.sqrt(self.T))
+            - self.r * self.K * math.exp(-self.r * self.T) * norm.cdf(d2)
+        )
+
+        put_theta = (
+            - (self.S * pdf_d1 * self.sigma) / (2 * math.sqrt(self.T))
+            + self.r * self.K * math.exp(-self.r * self.T) * norm.cdf(-d2)
+        )
+
+        call_rho = self.K * self.T * math.exp(-self.r * self.T) * norm.cdf(d2)
+        put_rho = -self.K * self.T * math.exp(-self.r * self.T) * norm.cdf(-d2)
+
+        return {
+            "call_delta": call_delta,
+            "put_delta": put_delta,
+            "gamma": gamma,
+            "vega": vega,
+            "call_theta": call_theta,
+            "put_theta": put_theta,
+            "call_rho": call_rho,
+            "put_rho": put_rho
+        }
+
 
 if __name__ == "__main__":
     time_to_maturity = 2
@@ -75,14 +108,20 @@ if __name__ == "__main__":
         interest_rate=interest_rate
     )
 
-    BS.run()
+    call_price, put_price = BS.price()
 
-    print(f"Call Price: {BS.call_price:.2f}")
-    print(f"Put Price: {BS.put_price:.2f}")
-    print(f"Call Delta: {BS.call_delta:.4f}")
-    print(f"Put Delta: {BS.put_delta:.4f}")
-    print(f"Call Gamma: {BS.call_gamma:.4f}")
-    print(f"Put Gamma: {BS.put_gamma:.4f}")
+    greeks = BS.greeks()
+
+    print(f"Call Price: {call_price:.2f}")
+    print(f"Put Price: {put_price:.2f}")
+    print(f"Call Delta: {greeks['call_delta']:.4f}")
+    print(f"Put Delta: {greeks['put_delta']:.4f}")
+    print(f"Gamma: {greeks['gamma']:.4f}")
+    print(f"Vega: {greeks['vega']:.4f}")
+    print(f"Call Theta: {greeks['call_theta']:.4f}")
+    print(f"Put Theta: {greeks['put_theta']:.4f}")
+    print(f"Call Rho: {greeks['call_rho']:.4f}")
+    print(f"Put Rho: {greeks['put_rho']:.4f}")
 
 
 
