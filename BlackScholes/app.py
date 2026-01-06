@@ -6,6 +6,14 @@ from data import get_stock_price
 from plots import Plots
 from BlackScholes import BlackScholes
 import numpy as np
+import datetime
+import yfinance as yf
+import pandas as pd
+from database import create_table, save_calculation, get_calculations, initialize_db, get_connection, save_output, get_outputs
+import sqlite3
+
+create_table()
+initialize_db()
 
 
 #UI Layout
@@ -16,20 +24,91 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
 with st.sidebar:
     st.title("📊 Black-Scholes Model")
     linkedin_url = "https://www.linkedin.com/in/joshualim2006"
     st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: none; color: inherit;"><img src="https://cdn-icons-png.flaticon.com/512/174/174857.png" width="25" height="25" style="vertical-align: middle; margin-right: 10px;">`Joshua Lim`</a>', unsafe_allow_html=True)
 
     ticker = st.text_input("StockTicker", "AAPL")
+    ticker_obj = yf.Ticker(ticker)
+    hist = ticker_obj.history(period="1y")
+    st.subheader(f"Historical Prices for {ticker} (1 yr)")
+    st.line_chart(hist['Close'])
+
+    hist['Returns'] = hist['Close'].pct_change()
+    hist_vol = hist['Returns'].std() * (252**0.5) #Annualized
+    st.write(f"Historical Volatility (1 year): {hist_vol*100:.2f}%")
+
 
     S = get_stock_price(ticker) if ticker else 100.0
     st.write(f"Current Stock Price: ${S:.2f}")
+    K = st.number_input("Strike (Purchase) Price", min_value=0.0, value= float(round(S / 5) * 5))
+    st.caption(f"Default strike set to nearest ATM")
 
-    K = st.number_input("Strike Price", min_value=0.0, value=100.0)
-    T = st.number_input("Time to Maturity (years)", min_value=0.1, value=1.0)
+    expiry_date = st.date_input(
+        "Expiration Date 📅",
+        value=datetime.date.today() + datetime.timedelta(days=30),  # default = 30 days ahead
+        min_value=datetime.date.today() + datetime.timedelta(days=1)  # cannot pick today or past
+    )
+
+    T = (expiry_date - datetime.date.today()).days / 365
+    st.caption(f"Time to maturity (years): {T:.4f}")
     sigma = st.number_input("Volatility (σ)", min_value=0.0, value=0.2)
     r = st.number_input("Risk-Free Rate", min_value=0.0, value=0.05)
+
+    market_price = st.sidebar.number_input(
+        "Market Option Price (optional)",
+        min_value = 0.0,
+        value = 0.0,
+        step=0.01
+    )
+
+    option_type = st.sidebar.radio(
+        "Option Type for Implied Volatility (IV)",
+        ["Call", "Put"]
+    )
+
+    BS = BlackScholes(time_to_maturity=T, strike=K, current_price=S, volatility = sigma, interest_rate=r)
+    call_price, put_price = BS.price() #call to populate call_price and greeks
+
+    if market_price > 0:
+        st.sidebar.caption(f"Input volatility: {sigma*100:.2f}%")
+        def implied_volatility(target_price, BS, option_type="call", tol=1e-6, max_iter=100):
+            low, high = 0.001, 5.0 #range for volatility
+            for i in range(max_iter):
+                mid = (low + high) / 2
+                BS.sigma = mid
+                call_price, put_price = BS.price()
+                price = call_price if option_type=="call" else put_price
+
+                if abs(price- target_price) < tol:
+                    return mid #bc found
+                elif price > target_price:
+                    high = mid
+                else:
+                    low = mid
+            return mid
+        iv = implied_volatility(market_price, BS, option_type.lower)
+        st.sidebar.success(f"Market-Implied Volatility: {iv*100:.2f}%")
+
+
+    moneyness = S / K
+
+    if 0.95 <= moneyness <= 1.05:
+        moneyness_label = "Value At-the-Money (ATM)"
+        color = "orange"
+    elif moneyness > 1.05:
+        moneyness_label = "Value In-the-Money (ITM)"
+        color = "green"
+    else:
+        moneyness_label = "Value Out-the-Money (OTM)"
+        color = "red"
+
+    st.markdown(
+        f'<span style="font-weight:bold; color:{color};">Moneyness: {moneyness_label}</span>',
+        unsafe_allow_html=True
+    )       
 
     # st.markdown("---")
     # run_model = st.button("Calculate")
@@ -93,10 +172,71 @@ st.markdown("""
 
 # #Button logic
 # if run_model:
-BS = BlackScholes(time_to_maturity=T, strike=K, current_price=S, volatility = sigma, interest_rate=r)
-call_price, put_price = BS.price() #call to populate call_price and greeks
+
 
 greeks = BS.greeks()
+
+st.markdown("---")
+st.subheader("Save this calculation")
+
+option_choice = st.selectbox("Option Type to Save", ["call", "put"])
+
+if st.button("Save Calculation"):
+    if option_choice == "call":
+        option_price = call_price
+        delta_val = greeks["call_delta"]
+        rho_val = greeks["call_rho"]
+    else:
+        option_price = put_price
+        delta_val = greeks["put_delta"]
+        rho_val = greeks["put_rho"]
+
+    #save greeks
+    save_calculation(
+        ticker=ticker if 'ticker' in locals() else None,
+        spot_price=S,
+        strike_price=K,
+        time_to_maturity=T,
+        volatility=sigma * 100,
+        risk_free_rate=r * 100,
+        option_type=option_choice,
+        option_price=option_price,
+        delta=delta_val,
+        gamma=greeks["gamma"],
+        theta=greeks["call_theta"] if option_choice=="call" else greeks["put_theta"],
+        vega=greeks["vega"],
+        rho=rho_val
+    )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_insert_rowid()")
+    input_id = cursor.fetchone()[0]
+    conn.close()
+
+
+    st.success(f"{option_choice.title()} calculation saved to database!")
+
+st.markdown("---")
+st.subheader("Calculation History")
+
+history = get_calculations(limit=100)
+
+if history:
+    columns = [
+        "ID", "Timestamp", "Ticker", "Spot Price", "Strike Price",
+        "Time to Maturity (years)", "Volatility (%)", "Risk-Free Rate (%)", "Option Type",
+        "Option Price", "Delta", "Gamma", "Theta", "Vega", "Rho"
+    ]
+
+    df_history = pd.DataFrame(history, columns=columns)
+
+    st.dataframe(df_history)
+
+else:
+    st.info("No calculations saved yet")
+
+
 
 metric_container = st.container()
 col1, col2 = metric_container.columns(2)
@@ -127,9 +267,9 @@ g1, g2, g3, g4, g5 = st.columns(5)
 
 g1.metric("Call Δ", f"{greeks['call_delta']:.4f}")
 g2.metric("Put Δ", f"{greeks['put_delta']:.4f}")
-g3.metric("Gamma", f"{greeks['gamma']:.4f}")
+g3.metric("Gamma", f"{greeks['gamma']:.6f}")
 g4.metric("Theta", f"{greeks['call_theta']:.4f}")
-g5.metric("Vega", f"{greeks['vega']:.4f}")
+g5.metric("Vega", f"{greeks['vega']:.6f}")
 
 st.subheader("Rho")
 r1, r2 = st.columns(2)
@@ -141,7 +281,7 @@ plots = Plots()
 st.markdown("---")
 st.subheader("2D Option Price HeatMaps")
 
-spot_range = np.linspace(S*0.8, S*1.2, 10)
+spot_range = np.linspace(K*0.85, K*1.15, 10)
 vol_range = np.linspace(0.1,0.5, 10)
 call_grid, put_grid = plots.generate_price_grid(BS, spot_range, vol_range)
 
@@ -154,6 +294,22 @@ with h1:
 with h2:
     st.caption("Put Price Sensitivity")
     st.pyplot(plots.plot_put_heatmap(put_grid, spot_range, vol_range))
+
+
+#Greek sens chart comparison
+st.subheader("Greek Sensivity Chart")
+greek_options = {
+    "call_delta", "put_delta", "gamma",
+    "call_theta", "put_theta", "vega",
+    "call_rho", "put_rho"
+}
+selected_greeks = st.multiselect("Select one or more Greeks to plot", greek_options, default=["call_delta"]) #multiselect for comparison
+if selected_greeks:
+    plt_multi = plots.greek_sens_multi(BS, S, selected_greeks)
+    st.pyplot(plt_multi)
+else:
+    st.info("Please select as least one Greek to display the chart")
+
 
 #3d heatmap
 st.markdown("---")
@@ -170,8 +326,33 @@ with s2:
         plots.plot_put_surface(put_grid, spot_range, vol_range),
         use_container_width=True
     )
-    
+
+#PNL heatmap
+st.markdown("---")
+st.subheader("Call & Put Option PnL Heatmaps")
+st.subheader("Call & Put Option PnL Heatmaps")
+
+# Call PnL
+call_pnl_png = plots.pnl_heatmap_single(BS, S, K, option_type="call")
+st.image(call_pnl_png, width=700)
+
+# Put PnL
+put_pnl_png = plots.pnl_heatmap_single(BS, S, K, option_type="put")
+st.image(put_pnl_png, width=700)
+
+call_pnl = np.maximum(spot_range - K, 0) - call_price
+put_pnl = np.maximum(K - spot_range, 0) - put_price
+
+save_output(
+    input_id=input_id,
+    call_grid=call_grid,
+    put_grid=put_grid,
+    vol_shock=None,
+    call_pnl=call_pnl,
+    put_pnl=put_pnl
+)
         
+
 
 
 
