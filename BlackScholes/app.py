@@ -11,6 +11,7 @@ import yfinance as yf
 import pandas as pd
 from database import create_table, save_calculation, get_calculations, initialize_db, get_connection, save_output, get_outputs
 import sqlite3
+from scenario import ShockScenario
 
 create_table()
 initialize_db()
@@ -30,19 +31,30 @@ with st.sidebar:
     linkedin_url = "https://www.linkedin.com/in/joshualim2006"
     st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: none; color: inherit;"><img src="https://cdn-icons-png.flaticon.com/512/174/174857.png" width="25" height="25" style="vertical-align: middle; margin-right: 10px;">`Joshua Lim`</a>', unsafe_allow_html=True)
 
-    ticker = st.text_input("StockTicker", "AAPL")
-    ticker_obj = yf.Ticker(ticker)
-    hist = ticker_obj.history(period="1y")
-    st.subheader(f"Historical Prices for {ticker} (1 yr)")
-    st.line_chart(hist['Close'])
+   
+    use_custom_price = st.sidebar.checkbox("Use custom current (spot) price?", value=False)
 
-    hist['Returns'] = hist['Close'].pct_change()
-    hist_vol = hist['Returns'].std() * (252**0.5) #Annualized
-    st.write(f"Historical Volatility (1 year): {hist_vol*100:.2f}%")
+    if use_custom_price:
+        S = st.number_input(
+            "Enter Current (Spot) Price",
+            min_value=0.0,
+            value=100.0,
+            step=0.01
+        )
+    else:
+        ticker = st.text_input("StockTicker", "AAPL")
+        ticker_obj = yf.Ticker(ticker)
 
+        hist = ticker_obj.history(period="1y")
+        st.subheader(f"Historical Prices for {ticker} (1 yr)")
+        st.line_chart(hist['Close'])
+        hist['Returns'] = hist['Close'].pct_change()
+        hist_vol = hist['Returns'].std() * (252**0.5) #Annualized
+        st.write(f"Historical Volatility (1 year): {hist_vol*100:.2f}%")
 
-    S = get_stock_price(ticker) if ticker else 100.0
-    st.write(f"Current Stock Price: ${S:.2f}")
+        S = get_stock_price(ticker) if ticker else 100.0
+        st.write(f"Current Stock Price: ${S:.2f}")
+
     K = st.number_input("Strike (Purchase) Price", min_value=0.0, value= float(round(S / 5) * 5))
     st.caption(f"Default strike set to nearest ATM")
 
@@ -69,8 +81,33 @@ with st.sidebar:
         ["Call", "Put"]
     )
 
+    st.sidebar.subheader("Scenario Shocks")
+
+    spot_shock_pct = st.sidebar.slider(
+        "Future Spot Shock (%)",
+        -50, 50, 0
+    ) / 100
+
+    vol_shock_pct = st.sidebar.slider(
+        "Volatility Spot Shock (%)",
+        -50, 50, 0
+    ) / 100
+
     BS = BlackScholes(time_to_maturity=T, strike=K, current_price=S, volatility = sigma, interest_rate=r)
     call_price, put_price = BS.price() #call to populate call_price and greeks
+
+    scenario = ShockScenario(
+        spot_shock = spot_shock_pct,
+        vol_shock = vol_shock_pct
+    )
+
+    S_shocked, sigma_shocked = scenario.apply(S, sigma)
+
+    BS_shocked = BlackScholes(time_to_maturity=T, strike=K, current_price=S_shocked, volatility = sigma_shocked, interest_rate=r)
+    call_price_shocked, put_price_shocked = BS_shocked.price()
+
+    call_pnl_value = call_price_shocked - call_price
+    put_pnl_value = put_price_shocked - put_price
 
     if market_price > 0:
         st.sidebar.caption(f"Input volatility: {sigma*100:.2f}%")
@@ -192,7 +229,7 @@ if st.button("Save Calculation"):
         rho_val = greeks["put_rho"]
 
     #save greeks
-    save_calculation(
+    input_id = save_calculation(
         ticker=ticker if 'ticker' in locals() else None,
         spot_price=S,
         strike_price=K,
@@ -208,19 +245,22 @@ if st.button("Save Calculation"):
         rho=rho_val
     )
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT last_insert_rowid()")
-    input_id = cursor.fetchone()[0]
-    conn.close()
+    save_output(
+        input_id=input_id,
+        call_grid=st.session_state["call_grid"],
+        put_grid=st.session_state["put_grid"],
+        vol_shock=None,
+        call_pnl=st.session_state["call_pnl"],
+        put_pnl=st.session_state["put_pnl"]
+    )
 
 
     st.success(f"{option_choice.title()} calculation saved to database!")
 
 st.markdown("---")
-st.subheader("Calculation History")
+st.subheader("Calculation Input History")
 
-history = get_calculations(limit=100)
+history = get_calculations(limit=50)
 
 if history:
     columns = [
@@ -234,8 +274,26 @@ if history:
     st.dataframe(df_history)
 
 else:
-    st.info("No calculations saved yet")
+    st.info("No inputs saved yet")
 
+st.subheader("Calculation Output History")
+
+outputs = get_outputs(limit=50)
+
+if outputs:
+    df_outputs = pd.DataFrame(outputs, columns=[
+        "Output ID",
+        "Input ID",
+        "Ticker",
+        "Spot",
+        "Strike",
+        "Vol Shock",
+        "Timestamp"
+    ])
+
+    st.dataframe(df_outputs)
+else:
+    st.info("No calulcation outputs saved yet")
 
 
 metric_container = st.container()
@@ -284,6 +342,8 @@ st.subheader("2D Option Price HeatMaps")
 spot_range = np.linspace(K*0.85, K*1.15, 10)
 vol_range = np.linspace(0.1,0.5, 10)
 call_grid, put_grid = plots.generate_price_grid(BS, spot_range, vol_range)
+st.session_state["call_grid"] = call_grid
+st.session_state["put_grid"] = put_grid
 
 h1, h2 = st.columns(2)
 
@@ -342,15 +402,8 @@ st.image(put_pnl_png, width=700)
 
 call_pnl = np.maximum(spot_range - K, 0) - call_price
 put_pnl = np.maximum(K - spot_range, 0) - put_price
-
-save_output(
-    input_id=input_id,
-    call_grid=call_grid,
-    put_grid=put_grid,
-    vol_shock=None,
-    call_pnl=call_pnl,
-    put_pnl=put_pnl
-)
+st.session_state["call_pnl"] = call_pnl
+st.session_state["put_pnl"] = put_pnl
         
 
 

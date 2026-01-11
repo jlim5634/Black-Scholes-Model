@@ -91,7 +91,9 @@ def save_calculation(
     ))
 
     conn.commit()
+    input_id = cursor.lastrowid
     conn.close()
+    return input_id
 
 
 def get_calculations(limit=50):
@@ -160,14 +162,28 @@ def initialize_db():
     create_table()
     create_output_table()
 
-def get_outputs(input_id):
+def get_outputs(limit=50):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT * FROM options_outputs
-        WHERE input_id = ?
-    """, (input_id,))
-    row = cursor.fetchone()
+        SELECT
+            o.id,
+            o.input_id,
+            c.ticker,
+            c.spot_price,
+            c.strike_price,
+            o.vol_shock,
+            o.timestamp
+        FROM option_outputs o
+        JOIN option_calculations c
+        ON o.input_id = c.id
+        ORDER BY o.timestamp DESC
+        LIMIT ?
+    """, (limit,))
+
+    rows = cursor.fetchall()
     conn.close()
-    return row
+    return rows
+
+
     
