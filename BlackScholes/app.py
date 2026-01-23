@@ -17,6 +17,7 @@ create_table()
 initialize_db()
 
 
+
 #UI Layout
 st.set_page_config(
     page_title="Black-Scholes Option Pricing Model",
@@ -143,7 +144,7 @@ with st.sidebar:
         color = "red"
 
     st.markdown(
-        f'<span style="font-weight:bold; color:{color};">Moneyness: {moneyness_label}</span>',
+        f'<span style="font-weight:bold; color:{color};">Current Moneyness: {moneyness_label}</span>',
         unsafe_allow_html=True
     )       
 
@@ -213,6 +214,13 @@ st.markdown("""
 
 greeks = BS.greeks()
 
+spot_range = np.linspace(K*0.85, K*1.15, 10)
+call_pnl = np.maximum(spot_range - K, 0) - call_price
+put_pnl = np.maximum(K - spot_range, 0) - put_price
+st.session_state["call_pnl"] = call_pnl
+st.session_state["put_pnl"] = put_pnl
+        
+
 st.markdown("---")
 st.subheader("Save this calculation")
 
@@ -221,16 +229,15 @@ option_choice = st.selectbox("Option Type to Save", ["call", "put"])
 if st.button("Save Calculation"):
     if option_choice == "call":
         option_price = call_price
-        delta_val = greeks["call_delta"]
+        theta_val = greeks["call_theta"]
         rho_val = greeks["call_rho"]
     else:
         option_price = put_price
-        delta_val = greeks["put_delta"]
+        theta_val = greeks["put_theta"]
         rho_val = greeks["put_rho"]
 
     #save greeks
     input_id = save_calculation(
-        ticker=ticker if 'ticker' in locals() else None,
         spot_price=S,
         strike_price=K,
         time_to_maturity=T,
@@ -238,18 +245,20 @@ if st.button("Save Calculation"):
         risk_free_rate=r * 100,
         option_type=option_choice,
         option_price=option_price,
-        delta=delta_val,
+        call_delta=greeks["call_delta"],
+        put_delta=greeks["put_delta"],
         gamma=greeks["gamma"],
-        theta=greeks["call_theta"] if option_choice=="call" else greeks["put_theta"],
+        theta=theta_val,
         vega=greeks["vega"],
         rho=rho_val
     )
 
     save_output(
         input_id=input_id,
-        call_grid=st.session_state["call_grid"],
-        put_grid=st.session_state["put_grid"],
-        vol_shock=None,
+        spot_price=S,
+        call_price=call_price,
+        put_price=put_price,
+        volatility= sigma * 100,
         call_pnl=st.session_state["call_pnl"],
         put_pnl=st.session_state["put_pnl"]
     )
@@ -264,12 +273,16 @@ history = get_calculations(limit=50)
 
 if history:
     columns = [
-        "ID", "Timestamp", "Ticker", "Spot Price", "Strike Price",
-        "Time to Maturity (years)", "Volatility (%)", "Risk-Free Rate (%)", "Option Type",
-        "Option Price", "Delta", "Gamma", "Theta", "Vega", "Rho"
+        "ID", "Timestamp", "Spot Price", "Strike Price",
+        "Time to Maturity (years)", "Volatility (%)", "Risk-Free Rate (%)", 
+        "Option Type", "Option Price", "Call Delta", "Put Delta", 
+        "Gamma", "Theta", "Vega", "Rho"
     ]
 
     df_history = pd.DataFrame(history, columns=columns)
+    # Format the timestamp column
+    df_history['Timestamp'] = pd.to_datetime(df_history['Timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+    df_history = df_history.drop(columns=[])
 
     st.dataframe(df_history)
 
@@ -284,12 +297,19 @@ if outputs:
     df_outputs = pd.DataFrame(outputs, columns=[
         "Output ID",
         "Input ID",
-        "Ticker",
         "Spot",
         "Strike",
-        "Vol Shock",
+        "Volatility(%)",
+        "Call Price",
+        "Put Price",
+        "Max Put PnL",
+        "Max Call PnL",
         "Timestamp"
     ])
+
+    # Format the timestamp column
+    df_outputs['Timestamp'] = pd.to_datetime(df_outputs['Timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+    df_outputs = df_outputs.drop(columns=[])
 
     st.dataframe(df_outputs)
 else:
@@ -400,11 +420,7 @@ st.image(call_pnl_png, width=700)
 put_pnl_png = plots.pnl_heatmap_single(BS, S, K, option_type="put")
 st.image(put_pnl_png, width=700)
 
-call_pnl = np.maximum(spot_range - K, 0) - call_price
-put_pnl = np.maximum(K - spot_range, 0) - put_price
-st.session_state["call_pnl"] = call_pnl
-st.session_state["put_pnl"] = put_pnl
-        
+
 
 
 

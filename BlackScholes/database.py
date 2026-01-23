@@ -3,6 +3,7 @@
 import sqlite3
 from datetime import datetime
 import json
+import numpy as np
 
 DB_NAME = "option_calculations.db"
 
@@ -18,7 +19,6 @@ def create_table():
     CREATE TABLE IF NOT EXISTS option_calculations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT,
-        ticker TEXT,
         spot_price REAL,
         strike_price REAL,
         time_to_maturity REAL,
@@ -26,7 +26,8 @@ def create_table():
         risk_free_rate REAL,
         option_type TEXT,
         option_price REAL,
-        delta REAL,
+        call_delta REAL,
+        put_delta REAL,
         gamma REAL,
         theta REAL,
         vega REAL,
@@ -39,7 +40,6 @@ def create_table():
 
 #writes one row to DB, input + output
 def save_calculation(
-    ticker,
     spot_price,
     strike_price,
     time_to_maturity,
@@ -47,7 +47,8 @@ def save_calculation(
     risk_free_rate,
     option_type,
     option_price,
-    delta,
+    call_delta,
+    put_delta,
     gamma,
     theta,
     vega,
@@ -59,7 +60,6 @@ def save_calculation(
     cursor.execute("""
     INSERT INTO option_calculations (
         timestamp,
-        ticker,
         spot_price,
         strike_price,
         time_to_maturity,
@@ -67,7 +67,8 @@ def save_calculation(
         risk_free_rate,
         option_type,
         option_price,
-        delta,
+        call_delta,
+        put_delta,
         gamma,
         theta,
         vega,
@@ -75,7 +76,6 @@ def save_calculation(
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         datetime.now(),
-        ticker,
         spot_price,
         strike_price,
         time_to_maturity,
@@ -83,7 +83,8 @@ def save_calculation(
         risk_free_rate,
         option_type,
         option_price,
-        delta,
+        call_delta,
+        put_delta,
         gamma,
         theta,
         vega,
@@ -118,9 +119,10 @@ def create_output_table():
     CREATE TABLE IF NOT EXISTS option_outputs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         input_id INTEGER,
-        call_heatmap TEXT,
-        put_heatmap TEXT,
-        vol_shock REAL,
+        spot_price REAL,
+        volatility REAL,
+        call_price REAL,
+        put_price REAL,
         call_pnl TEXT,
         put_pnl TEXT,
         timestamp TEXT,
@@ -131,27 +133,34 @@ def create_output_table():
     conn.commit()
     conn.close()
 
-def save_output(input_id, call_grid, put_grid, vol_shock, call_pnl, put_pnl):
+def save_output(input_id, spot_price, volatility, call_price, put_price, call_pnl, put_pnl):
     conn = get_connection()
     cursor = conn.cursor()
 
+    # Convert numpy arrays to JSON strings
+    call_pnl_json = json.dumps(call_pnl.tolist()) if isinstance(call_pnl, np.ndarray) else json.dumps(call_pnl)
+    put_pnl_json = json.dumps(put_pnl.tolist()) if isinstance(put_pnl, np.ndarray) else json.dumps(put_pnl)
+    
+
     cursor.execute("""
-    INSERT INTO option_outputs (
-        input_id,
-        call_heatmap,
-        put_heatmap,
-        vol_shock,
-        call_pnl,
-        put_pnl,
-        timestamp
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO option_outputs (
+            input_id,
+            spot_price,
+            volatility,
+            call_price,
+            put_price,
+            call_pnl,
+            put_pnl,
+            timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         input_id,
-        json.dumps(call_grid.tolist()),   # convert numpy array to list -> JSON
-        json.dumps(put_grid.tolist()),
-        vol_shock,
-        json.dumps(call_pnl.tolist()),
-        json.dumps(put_pnl.tolist()),
+        spot_price,
+        volatility,
+        call_price,
+        put_price,
+        call_pnl_json,
+        put_pnl_json,
         datetime.now().isoformat()
     ))
 
@@ -169,10 +178,13 @@ def get_outputs(limit=50):
         SELECT
             o.id,
             o.input_id,
-            c.ticker,
-            c.spot_price,
+            o.spot_price,
             c.strike_price,
-            o.vol_shock,
+            o.volatility,
+            o.call_price,
+            o.put_price,
+            o.call_pnl,
+            o.put_pnl,
             o.timestamp
         FROM option_outputs o
         JOIN option_calculations c
@@ -183,7 +195,32 @@ def get_outputs(limit=50):
 
     rows = cursor.fetchall()
     conn.close()
-    return rows
-
-
     
+    # Parse PnL and calculate max values
+    processed_rows = []
+    for row in rows:
+        try:
+            call_pnl_array = json.loads(row[7]) if row[7] else []
+            put_pnl_array = json.loads(row[8]) if row[8] else []
+            
+            max_call_pnl = max(call_pnl_array) if call_pnl_array else 0
+            max_put_pnl = max(put_pnl_array) if put_pnl_array else 0
+            
+            processed_rows.append([
+                row[0],  # id
+                row[1],  # input_id
+                row[2],  # spot_price
+                row[3],  # strike_price
+                row[4],  # volatility
+                row[5],  # call_price
+                row[6],  # put_price
+                max_call_pnl,  # max call pnl
+                max_put_pnl,   # max put pnl
+                row[9]   # timestamp
+            ])
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            # Skip corrupted rows
+            print(f"Skipping corrupted row {row[0]}: {e}")
+            continue
+    
+    return processed_rows
